@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { GameState, Vector2, Player, Bullet, Enemy, EnemyType, Particle, ExperienceOrb } from './types';
-import { Target, Zap, Shield, Play, RotateCcw, Trophy, History, Clock, Trash2, ArrowUpCircle, Flame, Heart, Wind } from 'lucide-react';
+import { GameState, Vector2, Player, Bullet, Enemy, EnemyType, Particle, ExperienceOrb, HealthPack } from './types';
+import { Target, Zap, Shield, Play, RotateCcw, Trophy, History, Clock, Trash2, ArrowUpCircle, Flame, Heart, Wind, PlusCircle } from 'lucide-react';
 
 const CANVAS_WIDTH = window.innerWidth;
 const CANVAS_HEIGHT = window.innerHeight;
@@ -10,6 +10,8 @@ const INITIAL_PLAYER_FIRE_RATE = 140;
 const INITIAL_PLAYER_SPEED = 6; 
 const INITIAL_SPAWN_INTERVAL = 1800; 
 const MIN_SPAWN_INTERVAL = 500; 
+const INITIAL_MAX_HEALTH = 200; // 再次提升初始生命值，从150提升至200
+const HEALTH_PACK_DROP_CHANCE = 0.06; // 稍微提升掉落率至6%
 
 interface GameRecord {
   score: number;
@@ -28,6 +30,7 @@ interface UpgradeOption {
 
 const App: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
   const [gameState, setGameState] = useState<GameState>(GameState.START);
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
@@ -44,8 +47,8 @@ const App: React.FC = () => {
     pos: { x: CANVAS_WIDTH / 2, y: CANVAS_HEIGHT / 2 },
     velocity: { x: 0, y: 0 },
     radius: 15,
-    health: 100,
-    maxHealth: 100,
+    health: INITIAL_MAX_HEALTH,
+    maxHealth: INITIAL_MAX_HEALTH,
     color: '#00f2ff',
     score: 0,
     lastShot: 0,
@@ -62,6 +65,7 @@ const App: React.FC = () => {
   const enemiesRef = useRef<Enemy[]>([]);
   const particlesRef = useRef<Particle[]>([]);
   const experienceOrbsRef = useRef<ExperienceOrb[]>([]);
+  const healthPacksRef = useRef<HealthPack[]>([]);
   const keysRef = useRef<Set<string>>(new Set());
   const mouseRef = useRef<Vector2>({ x: 0, y: 0 });
   
@@ -71,6 +75,85 @@ const App: React.FC = () => {
   const enemiesKilledRef = useRef<number>(0);
   const screenShakeRef = useRef<number>(0);
   const frameIdRef = useRef<number>(0);
+
+  // 音效合成系统
+  const initAudio = async () => {
+    if (!audioCtxRef.current) {
+      audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
+    if (audioCtxRef.current.state === 'suspended') {
+      await audioCtxRef.current.resume();
+    }
+  };
+
+  const playSound = (type: 'shoot' | 'hit' | 'death' | 'playerHit' | 'pickup' | 'levelup') => {
+    if (!audioCtxRef.current || audioCtxRef.current.state !== 'running') return;
+    const ctx = audioCtxRef.current;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    const now = ctx.currentTime;
+
+    switch (type) {
+      case 'shoot':
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(800, now);
+        osc.frequency.exponentialRampToValueAtTime(100, now + 0.1);
+        gain.gain.setValueAtTime(0.04, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+        osc.start(now);
+        osc.stop(now + 0.1);
+        break;
+      case 'hit':
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(1200, now);
+        gain.gain.setValueAtTime(0.015, now);
+        gain.gain.linearRampToValueAtTime(0, now + 0.05);
+        osc.start(now);
+        osc.stop(now + 0.05);
+        break;
+      case 'death':
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(200, now);
+        osc.frequency.linearRampToValueAtTime(50, now + 0.2);
+        gain.gain.setValueAtTime(0.08, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+        osc.start(now);
+        osc.stop(now + 0.2);
+        break;
+      case 'playerHit':
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(150, now);
+        osc.frequency.linearRampToValueAtTime(40, now + 0.3);
+        gain.gain.setValueAtTime(0.2, now);
+        gain.gain.linearRampToValueAtTime(0, now + 0.3);
+        osc.start(now);
+        osc.stop(now + 0.3);
+        break;
+      case 'pickup':
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(400, now);
+        osc.frequency.exponentialRampToValueAtTime(1200, now + 0.1);
+        gain.gain.setValueAtTime(0.08, now);
+        gain.gain.linearRampToValueAtTime(0, now + 0.1);
+        osc.start(now);
+        osc.stop(now + 0.1);
+        break;
+      case 'levelup':
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(523.25, now); 
+        osc.frequency.setValueAtTime(659.25, now + 0.1); 
+        osc.frequency.setValueAtTime(783.99, now + 0.2); 
+        gain.gain.setValueAtTime(0.1, now);
+        gain.gain.linearRampToValueAtTime(0, now + 0.4);
+        osc.start(now);
+        osc.stop(now + 0.4);
+        break;
+    }
+  };
 
   useEffect(() => {
     const savedHighScore = localStorage.getItem('neon-strike-highscore');
@@ -87,11 +170,12 @@ const App: React.FC = () => {
   }, []);
 
   const resetGame = useCallback(() => {
+    initAudio();
     playerRef.current = {
       ...playerRef.current,
       pos: { x: CANVAS_WIDTH / 2, y: CANVAS_HEIGHT / 2 },
-      health: 100,
-      maxHealth: 100,
+      health: INITIAL_MAX_HEALTH,
+      maxHealth: INITIAL_MAX_HEALTH,
       score: 0,
       level: 1,
       exp: 0,
@@ -105,6 +189,7 @@ const App: React.FC = () => {
     enemiesRef.current = [];
     particlesRef.current = [];
     experienceOrbsRef.current = [];
+    healthPacksRef.current = [];
     scoreRef.current = 0;
     setScore(0);
     setLevel(1);
@@ -154,6 +239,16 @@ const App: React.FC = () => {
     });
   };
 
+  const spawnHealthPack = (pos: Vector2) => {
+    healthPacksRef.current.push({
+      id: Math.random().toString(),
+      pos: { ...pos },
+      value: 30, // 提升血包回复值
+      color: '#22c55e',
+      radius: 12
+    });
+  };
+
   const spawnEnemy = useCallback(() => {
     const side = Math.floor(Math.random() * 4);
     let x, y;
@@ -171,13 +266,36 @@ const App: React.FC = () => {
     const titanThreshold = Math.max(0.85, 0.98 - gameDuration / 200);
     const hunterThreshold = Math.max(0.6, 0.90 - gameDuration / 150);
 
-    let config = { health: 25 * difficultyLevel, color: '#ff0055', radius: 12, score: 100, fireRate: 0 };
+    let config;
     if (rand > titanThreshold) { 
       type = 'titan';
-      config = { health: 250 * difficultyLevel, color: '#bd00ff', radius: 30, score: 500, fireRate: 3800 / Math.sqrt(difficultyLevel) };
+      // 强化泰坦：生命值大幅增加，射击间隔缩短
+      config = { 
+        health: 350 * difficultyLevel, 
+        color: '#bd00ff', 
+        radius: 35, 
+        score: 800, 
+        fireRate: 3400 / Math.sqrt(difficultyLevel) 
+      };
     } else if (rand > hunterThreshold) { 
       type = 'hunter';
-      config = { health: 70 * difficultyLevel, color: '#ffcc00', radius: 18, score: 300, fireRate: 2800 / Math.sqrt(difficultyLevel) };
+      // 削弱猎手：生命值降低，射击间隔略长
+      config = { 
+        health: 55 * difficultyLevel, 
+        color: '#ffcc00', 
+        radius: 18, 
+        score: 300, 
+        fireRate: 3000 / Math.sqrt(difficultyLevel) 
+      };
+    } else {
+      // 削弱先锋：生命值从25降至18
+      config = { 
+        health: 18 * difficultyLevel, 
+        color: '#ff0055', 
+        radius: 12, 
+        score: 100, 
+        fireRate: 0 
+      };
     }
 
     enemiesRef.current.push({
@@ -201,9 +319,11 @@ const App: React.FC = () => {
       radius: 4, health: 1, color: '#00f2ff', damage: playerRef.current.damage, ownerId: 'player'
     });
     playerRef.current.lastShot = now;
+    playSound('shoot');
   };
 
   const triggerLevelUp = () => {
+    playSound('levelup');
     const options: UpgradeOption[] = [
       {
         id: 'fire_rate',
@@ -222,11 +342,11 @@ const App: React.FC = () => {
       {
         id: 'health',
         title: '结构加固',
-        description: '最大生命值 +20，并回复 30 点',
+        description: '最大生命值 +60，并回复 100 点', 
         icon: <Heart className="text-red-500" />,
         action: () => { 
-          playerRef.current.maxHealth += 20; 
-          playerRef.current.health = Math.min(playerRef.current.maxHealth, playerRef.current.health + 30);
+          playerRef.current.maxHealth += 60; 
+          playerRef.current.health = Math.min(playerRef.current.maxHealth, playerRef.current.health + 100);
         }
       },
       {
@@ -281,6 +401,7 @@ const App: React.FC = () => {
       }
 
       if (dist < playerRef.current.radius + orb.radius) {
+        playSound('pickup');
         playerRef.current.exp += orb.value;
         createExplosion(orb.pos, orb.color, 5, 0.4);
         experienceOrbsRef.current.splice(i, 1);
@@ -293,6 +414,26 @@ const App: React.FC = () => {
           triggerLevelUp();
         }
         setExpProgress(playerRef.current.exp / playerRef.current.expToNextLevel);
+      }
+    }
+
+    for (let i = healthPacksRef.current.length - 1; i >= 0; i--) {
+      const pack = healthPacksRef.current[i];
+      const dx = playerRef.current.pos.x - pack.pos.x;
+      const dy = playerRef.current.pos.y - pack.pos.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+
+      if (dist < 150) {
+        const speed = 7.0;
+        pack.pos.x += (dx / dist) * speed;
+        pack.pos.y += (dy / dist) * speed;
+      }
+
+      if (dist < playerRef.current.radius + pack.radius) {
+        playSound('pickup');
+        playerRef.current.health = Math.min(playerRef.current.maxHealth, playerRef.current.health + pack.value);
+        createExplosion(pack.pos, pack.color, 12, 0.6);
+        healthPacksRef.current.splice(i, 1);
       }
     }
 
@@ -321,6 +462,7 @@ const App: React.FC = () => {
       
       const dist = Math.sqrt((playerRef.current.pos.x - b.pos.x)**2 + (playerRef.current.pos.y - b.pos.y)**2);
       if (dist < playerRef.current.radius + b.radius) {
+        playSound('playerHit');
         playerRef.current.health -= b.damage;
         screenShakeRef.current = 10;
         enemyBulletsRef.current.splice(i, 1);
@@ -366,6 +508,7 @@ const App: React.FC = () => {
       e.pos.x += e.velocity.x; e.pos.y += e.velocity.y;
 
       if (dist < playerRef.current.radius + e.radius) {
+        playSound('playerHit');
         playerRef.current.health -= e.type === 'titan' ? 2.0 : 1.0;
         screenShakeRef.current = 8;
         if (playerRef.current.health <= 0) endGame();
@@ -379,11 +522,13 @@ const App: React.FC = () => {
         
         if (bdist < e.radius + b.radius) {
           e.health -= b.damage;
-          e.lastHitTime = now; // 记录击中时间用于白闪
+          e.lastHitTime = now; 
           bulletsRef.current.splice(bi, 1);
           createExplosion(b.pos, '#ffffff', 3, 0.5);
+          playSound('hit');
 
           if (e.health <= 0) {
+            playSound('death');
             enemiesKilledRef.current++;
             const newScore = scoreRef.current + e.scoreValue;
             scoreRef.current = newScore;
@@ -392,6 +537,10 @@ const App: React.FC = () => {
             
             const expVal = e.type === 'titan' ? 80 : (e.type === 'hunter' ? 35 : 15);
             spawnExperience(e.pos, expVal);
+
+            if (Math.random() < HEALTH_PACK_DROP_CHANCE) {
+              spawnHealthPack(e.pos);
+            }
 
             const shakeAmt = e.type === 'titan' ? 18 : 5;
             screenShakeRef.current = Math.max(screenShakeRef.current, shakeAmt);
@@ -422,7 +571,6 @@ const App: React.FC = () => {
     ctx.save();
     ctx.translate(e.pos.x, e.pos.y);
     
-    // 受击白闪逻辑
     const now = Date.now();
     const isFlashing = e.lastHitTime && now - e.lastHitTime < 50;
     
@@ -451,7 +599,6 @@ const App: React.FC = () => {
     ctx.closePath(); 
     ctx.stroke(); 
     
-    // 内部填充增强体感
     if (isFlashing) {
         ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
         ctx.fill();
@@ -469,7 +616,6 @@ const App: React.FC = () => {
     ctx.fillStyle = '#060606'; 
     ctx.fillRect(-50, -50, CANVAS_WIDTH + 100, CANVAS_HEIGHT + 100);
 
-    // 视差网格背景
     const parallaxX = (playerRef.current.pos.x / CANVAS_WIDTH) * 20;
     const parallaxY = (playerRef.current.pos.y / CANVAS_HEIGHT) * 20;
     
@@ -500,6 +646,26 @@ const App: React.FC = () => {
       ctx.fill();
     });
 
+    healthPacksRef.current.forEach(pack => {
+      ctx.save();
+      ctx.translate(pack.pos.x, pack.pos.y);
+      ctx.rotate(Date.now() * 0.002);
+      ctx.fillStyle = pack.color;
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = pack.color;
+      
+      const r = pack.radius;
+      const w = r * 0.4;
+      ctx.fillRect(-r, -w, r * 2, w * 2);
+      ctx.fillRect(-w, -r, w * 2, r * 2);
+      
+      ctx.fillStyle = 'white';
+      ctx.shadowBlur = 0;
+      ctx.fillRect(-r * 0.7, -w * 0.4, r * 1.4, w * 0.8);
+      ctx.fillRect(-w * 0.4, -r * 0.7, w * 0.8, r * 1.4);
+      ctx.restore();
+    });
+
     particlesRef.current.forEach(p => {
       ctx.fillStyle = p.color; 
       ctx.globalAlpha = p.life;
@@ -520,14 +686,12 @@ const App: React.FC = () => {
     });
     ctx.globalAlpha = 1;
 
-    // 玩家绘制 + 动态残影效果
     const pl = playerRef.current;
     ctx.save();
     ctx.translate(pl.pos.x, pl.pos.y);
     const playerAngle = Math.atan2(mouseRef.current.y - pl.pos.y, mouseRef.current.x - pl.pos.x);
     ctx.rotate(playerAngle);
     
-    // 玩家护盾感
     ctx.strokeStyle = pl.color;
     ctx.shadowBlur = 25;
     ctx.shadowColor = pl.color;
@@ -537,13 +701,11 @@ const App: React.FC = () => {
     ctx.closePath();
     ctx.stroke();
     
-    // 内部核心
     ctx.fillStyle = 'rgba(0, 242, 255, 0.2)';
     ctx.fill();
     ctx.restore();
 
     bulletsRef.current.forEach(b => {
-      // 子弹带点小尾巴
       ctx.strokeStyle = b.color;
       ctx.lineWidth = b.radius * 1.5;
       ctx.lineCap = 'round';
@@ -563,7 +725,6 @@ const App: React.FC = () => {
       ctx.shadowBlur = 12;
       ctx.shadowColor = b.color;
       ctx.beginPath(); ctx.arc(b.pos.x, b.pos.y, b.isHoming ? b.radius * 1.5 : b.radius, 0, Math.PI*2); ctx.fill();
-      // 核心
       ctx.fillStyle = 'white';
       ctx.beginPath(); ctx.arc(b.pos.x, b.pos.y, b.radius * 0.4, 0, Math.PI*2); ctx.fill();
     });
@@ -608,7 +769,11 @@ const App: React.FC = () => {
     };
   }, [gameState]);
 
-  const startGame = () => { resetGame(); setGameState(GameState.PLAYING); };
+  const startGame = async () => { 
+    await initAudio(); 
+    resetGame(); 
+    setGameState(GameState.PLAYING); 
+  };
   
   const endGame = () => {
     const finalScore = scoreRef.current;
@@ -641,6 +806,7 @@ const App: React.FC = () => {
     setGameState(GameState.PLAYING);
     createExplosion(playerRef.current.pos, '#ffffff', 40, 2);
     screenShakeRef.current = 20;
+    playSound('pickup');
   };
 
   const isLowHealth = playerRef.current.health < playerRef.current.maxHealth * 0.3;
@@ -718,7 +884,7 @@ const App: React.FC = () => {
             
             <div className="text-white/40 text-xs leading-relaxed font-medium px-4">
               收集 <span className="text-[#00f2ff]">经验核心</span> 进化机能。<br/>
-              感受经过美术重制的视觉冲击与打击反馈。
+              收集 <span className="text-[#22c55e]">紧急修复包</span> 恢复生命。
             </div>
 
             <button onClick={startGame} className="group relative w-full bg-white text-black font-black py-5 rounded-2xl flex items-center justify-center gap-3 transition-all transform active:scale-95 overflow-hidden uppercase">

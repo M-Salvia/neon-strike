@@ -33,6 +33,14 @@ export interface ExperienceOrb {
   radius: number;
 }
 
+export interface HealthPack {
+  id: string;
+  pos: Vector2;
+  value: number;
+  color: string;
+  radius: number;
+}
+
 export interface Bullet extends Entity {
   damage: number;
   ownerId: string;
@@ -49,7 +57,7 @@ export interface Enemy extends Entity {
   lastShot: number;
   fireRate: number;
   angle?: number;
-  lastHitTime?: number; // 新增：用于受击白闪
+  lastHitTime?: number;
 }
 
 export interface Particle {
@@ -59,7 +67,7 @@ export interface Particle {
   life: number;
   maxLife: number;
   color: string;
-  type?: 'circle' | 'rect' | 'line'; // 新增：粒子类型
+  type?: 'circle' | 'rect' | 'line';
 }
 
 export enum GameState {
