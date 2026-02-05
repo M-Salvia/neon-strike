@@ -17,6 +17,20 @@ export interface Player extends Entity {
   score: number;
   lastShot: number;
   maxHealth: number;
+  level: number;
+  exp: number;
+  expToNextLevel: number;
+  fireRate: number;
+  damage: number;
+  moveSpeed: number;
+}
+
+export interface ExperienceOrb {
+  id: string;
+  pos: Vector2;
+  value: number;
+  color: string;
+  radius: number;
 }
 
 export interface Bullet extends Entity {
@@ -24,7 +38,7 @@ export interface Bullet extends Entity {
   ownerId: string;
   isHoming?: boolean;
   homingStrength?: number;
-  lifeSpan?: number; // for homing duration
+  lifeSpan?: number; 
 }
 
 export type EnemyType = 'vanguard' | 'titan' | 'hunter';
@@ -34,7 +48,8 @@ export interface Enemy extends Entity {
   scoreValue: number;
   lastShot: number;
   fireRate: number;
-  angle?: number; // for visual rotation or movement
+  angle?: number;
+  lastHitTime?: number; // 新增：用于受击白闪
 }
 
 export interface Particle {
@@ -44,10 +59,12 @@ export interface Particle {
   life: number;
   maxLife: number;
   color: string;
+  type?: 'circle' | 'rect' | 'line'; // 新增：粒子类型
 }
 
 export enum GameState {
   START = 'START',
   PLAYING = 'PLAYING',
+  LEVEL_UP = 'LEVEL_UP',
   GAMEOVER = 'GAMEOVER'
 }
