@@ -1,20 +1,50 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# ⚡ Neon Strike
 
-# Run and deploy your AI Studio app
+**Neon Strike** 是一款高强度、极简风格的赛博朋克平面射击游戏。在这个霓虹闪烁的终端世界里，你将扮演一名神经链路操纵者，对抗不断进化的数字病毒，通过获取经验核心实现机体进化。
 
-This contains everything you need to run your app locally.
+## 🚀 立即体验
 
-View your app in AI Studio: https://ai.studio/apps/drive/18QoIZdEtz9Jfuac_hmWRvaVmWwIYKPXi
+游戏已部署，点击下方链接即可开始战斗：
+**[https://neon-strike.netlify.app/](https://neon-strike.netlify.app/)**
 
-## Run Locally
+---
 
-**Prerequisites:**  Node.js
+## 🎮 游戏规则
 
+### 1. 基础操作
+- **移动**：使用 `W` `A` `S` `D` 键控制机体在空间内自由移动。
+- **攻击**：使用 **鼠标** 瞄准，点击 **左键** 发射高能脉冲。
+- **目标**：生存下去并尽可能获取更高的积分（载荷）。
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+### 2. 成长机制
+- **经验回收**：消灭敌人后会掉落 **蓝色经验核心**。靠近核心会自动磁吸回收。
+- **同步升级**：经验槽满后会触发“同步升级”，你可以从随机生成的三个强化模块中选择一个（如：提升射速、增加伤害、强化结构或脉冲引擎）。
+- **紧急修复**：击败敌人有几率掉落 **绿色修复包**，拾取可恢复大量机体生命值。
+
+### 3. 敌方单位
+- **红区先锋 (Vanguard)**：成群结队的近战单位，速度较快，试图通过碰撞破坏你的机体。
+- **黄色猎手 (Hunter)**：远程狙击单位，会发射带有轻微追踪功能的干扰弹。
+- **紫色泰坦 (Titan)**：重型要塞单位，拥有极高的生命值，并能周期性释放全方位弹幕。
+
+---
+
+## ✨ 核心亮点
+
+- **极致打击感**：通过白闪反馈、屏幕震动、粒子爆炸效果，营造出极佳的操作反馈。
+- **纯代码艺术**：
+  - **零资源占用**：游戏画面完全由 Canvas 实时绘制，没有任何外部图片素材。
+  - **过程化音效**：利用 Web Audio API 在运行中实时合成所有射击、爆炸和 UI 音效。
+- **复古视觉**：内置 CRT 扫描线滤镜、暗角效果和视差背景网格，打造沉浸式的 80s 赛博氛围。
+- **持久战绩**：本地存储系统会自动记录你的历史最高分和最近五场的作战记录。
+
+---
+
+## 🛠️ 技术栈
+
+- **框架**：React 19
+- **渲染**：HTML5 Canvas API
+- **样式**：Tailwind CSS
+- **音频**：Web Audio API
+- **图标**：Lucide React
+
+---
