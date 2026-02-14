@@ -23,6 +23,22 @@ export interface Player extends Entity {
   fireRate: number;
   damage: number;
   moveSpeed: number;
+  // 增强因子状态
+  activePowerUps: {
+    overclock: number; // 剩余毫秒
+    shield: boolean;   // 是否持有护盾
+    sensor: number;    // 剩余毫秒
+    vectorCore: number; // 剩余子弹数
+  };
+}
+
+export interface PowerUp {
+  id: string;
+  pos: Vector2;
+  type: 'overclock' | 'shield' | 'sensor' | 'vectorCore';
+  color: string;
+  radius: number;
+  spawnTime: number;
 }
 
 export interface ExperienceOrb {
@@ -47,6 +63,8 @@ export interface Bullet extends Entity {
   isHoming?: boolean;
   homingStrength?: number;
   lifeSpan?: number; 
+  bounceCount?: number;
+  noDecay?: boolean; // 新增：反弹不衰减伤害
 }
 
 export type EnemyType = 'vanguard' | 'titan' | 'hunter';
@@ -58,6 +76,11 @@ export interface Enemy extends Entity {
   fireRate: number;
   angle?: number;
   lastHitTime?: number;
+}
+
+export interface PlayerPart {
+    pos: Vector2;
+    color: string;
 }
 
 export interface Particle {
@@ -75,4 +98,10 @@ export enum GameState {
   PLAYING = 'PLAYING',
   LEVEL_UP = 'LEVEL_UP',
   GAMEOVER = 'GAMEOVER'
+}
+
+export enum GameMode {
+  SURVIVAL = 'SURVIVAL',
+  NEONLINK = 'NEONLINK',
+  TRAINING = 'TRAINING'
 }
