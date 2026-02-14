@@ -38,6 +38,11 @@ interface UpgradeOption {
   action: () => void;
 }
 
+// 扩展 Player 类型以存储对手的角度
+interface ExtendedPlayer extends Player {
+  angle?: number;
+}
+
 const App: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -58,6 +63,7 @@ const App: React.FC = () => {
   const [copyFeedback, setCopyFeedback] = useState(false);
   const peerRef = useRef<any>(null);
   const connectionRef = useRef<any>(null);
+  const isHostRef = useRef<boolean>(false);
 
   const scoreRef = useRef<number>(0);
   
@@ -68,7 +74,7 @@ const App: React.FC = () => {
     vectorCore: 0
   };
 
-  const playerRef = useRef<Player>({
+  const playerRef = useRef<ExtendedPlayer>({
     id: 'player',
     pos: { x: CANVAS_WIDTH / 2, y: CANVAS_HEIGHT / 2 },
     velocity: { x: 0, y: 0 },
@@ -84,10 +90,11 @@ const App: React.FC = () => {
     fireRate: INITIAL_PLAYER_FIRE_RATE,
     damage: 35,
     moveSpeed: INITIAL_PLAYER_SPEED,
-    activePowerUps: { ...initialPowerUps }
+    activePowerUps: { ...initialPowerUps },
+    angle: 0
   });
 
-  const opponentRef = useRef<Player>({
+  const opponentRef = useRef<ExtendedPlayer>({
     id: 'opponent',
     pos: { x: CANVAS_WIDTH - 100, y: CANVAS_HEIGHT / 2 },
     velocity: { x: 0, y: 0 },
@@ -103,7 +110,8 @@ const App: React.FC = () => {
     fireRate: 400,
     damage: 25,
     moveSpeed: 4,
-    activePowerUps: { ...initialPowerUps }
+    activePowerUps: { ...initialPowerUps },
+    angle: 0
   });
 
   const mazeWallsRef = useRef<Rect[]>([]);
@@ -192,33 +200,40 @@ const App: React.FC = () => {
     }
   };
 
-  const setupPeerCallbacks = (conn: any) => {
+  const setupConnectionListeners = (conn: any) => {
     conn.on('data', (data: any) => {
-      if (data.type === 'maze') {
+      if (data.type === 'INIT_MAZE') {
         mazeWallsRef.current = data.walls;
-      } else if (data.type === 'state') {
+        playerRef.current.pos = data.guestSpawn;
+        opponentRef.current.pos = data.hostSpawn;
+      } else if (data.type === 'SYNC_STATE') {
         opponentRef.current.pos = data.pos;
         opponentRef.current.health = data.health;
-        opponentRef.current.maxHealth = data.maxHealth;
-        opponentRef.current.activePowerUps = data.activePowerUps;
-      } else if (data.type === 'bullet') {
-        opponentsBulletsRef.current.push(data.bullet);
+        opponentRef.current.activePowerUps = data.powerUps;
+        opponentRef.current.angle = data.angle;
+      } else if (data.type === 'SHOOT') {
+        opponentsBulletsRef.current.push({
+          id: Math.random().toString(), 
+          pos: { ...opponentRef.current.pos },
+          velocity: { x: Math.cos(data.angle) * data.speed, y: Math.sin(data.angle) * data.speed },
+          radius: 4, health: 1, color: opponentRef.current.color,
+          damage: opponentRef.current.damage, ownerId: 'opponent', 
+          bounceCount: data.bounceCount, noDecay: data.noDecay
+        });
         playSound('shoot');
-      } else if (data.type === 'powerup_spawn') {
-        powerUpsRef.current.push(data.powerUp);
-        createExplosion(data.powerUp.pos, data.powerUp.color, 10, 0.5);
-      } else if (data.type === 'powerup_collect') {
+      } else if (data.type === 'POWERUP_COLLECT') {
         const idx = powerUpsRef.current.findIndex(p => p.id === data.id);
         if (idx !== -1) {
-            const p = powerUpsRef.current[idx];
-            createExplosion(p.pos, p.color, 25, 1.2);
-            powerUpsRef.current.splice(idx, 1);
+          createExplosion(powerUpsRef.current[idx].pos, powerUpsRef.current[idx].color, 25, 1.2);
+          powerUpsRef.current.splice(idx, 1);
         }
+      } else if (data.type === 'GAME_OVER') {
+          setGameState(GameState.GAMEOVER);
       }
     });
     conn.on('close', () => {
-      setConnStatus('idle');
-      if (gameState === GameState.PLAYING) setGameState(GameState.GAMEOVER);
+        setConnStatus('idle');
+        if (gameState === GameState.PLAYING) setGameState(GameState.START);
     });
   };
 
@@ -286,12 +301,13 @@ const App: React.FC = () => {
     }
 
     mazeWallsRef.current = walls;
-    playerRef.current.pos = { x: xOffset + cellSize / 2, y: yOffset + cellSize / 2 };
-    opponentRef.current.pos = { x: xOffset + (cols - 0.5) * cellSize, y: yOffset + (rows - 0.5) * cellSize };
+    const hostSpawn = { x: xOffset + cellSize / 2, y: yOffset + cellSize / 2 };
+    const guestSpawn = { x: xOffset + (cols - 0.5) * cellSize, y: yOffset + (rows - 0.5) * cellSize };
+    
+    playerRef.current.pos = isHostRef.current ? hostSpawn : guestSpawn;
+    opponentRef.current.pos = isHostRef.current ? guestSpawn : hostSpawn;
 
-    if (gameMode === GameMode.NEONLINK && connectionRef.current) {
-        connectionRef.current.send({ type: 'maze', walls });
-    }
+    return { walls, hostSpawn, guestSpawn };
   };
 
   useEffect(() => {
@@ -299,18 +315,22 @@ const App: React.FC = () => {
     if (savedHighScore) setHighScore(parseInt(savedHighScore, 10));
     const savedHistory = localStorage.getItem('neon-strike-history');
     if (savedHistory) { try { setGameHistory(JSON.parse(savedHistory)); } catch (e) { setGameHistory([]); } }
-    
     if (typeof Peer !== 'undefined') {
       const peer = new Peer();
       peer.on('open', (id: string) => setPeerId(id));
       peer.on('connection', (conn: any) => {
-        connectionRef.current = conn;
-        setupPeerCallbacks(conn);
-        setConnStatus('connected');
-        setGameMode(GameMode.NEONLINK);
-        setGameState(GameState.PLAYING);
-        // 被叫方等待主叫方发送迷宫数据
-        resetGame(GameMode.NEONLINK);
+        isHostRef.current = true;
+        connectionRef.current = conn; 
+        setConnStatus('connected'); 
+        setupConnectionListeners(conn);
+        setGameMode(GameMode.NEONLINK); 
+        setGameState(GameState.PLAYING); 
+        initAudio();
+        // 关键：确保 Host 在连接状态确认后再生成地图
+        conn.on('open', () => {
+           const mazeData = generateMaze(GameMode.NEONLINK);
+           conn.send({ type: 'INIT_MAZE', ...mazeData });
+        });
       });
       peerRef.current = peer;
     }
@@ -320,16 +340,18 @@ const App: React.FC = () => {
   const connectToPeer = () => {
     if (!peerRef.current || !targetId) return;
     setConnStatus('connecting');
+    isHostRef.current = false;
     const conn = peerRef.current.connect(targetId);
+    
+    // 关键优化：立即绑定监听器，防止错过 INIT_MAZE
+    setupConnectionListeners(conn);
+
     conn.on('open', () => {
-      connectionRef.current = conn;
-      setupPeerCallbacks(conn);
-      setConnStatus('connected');
-      setGameMode(GameMode.NEONLINK);
-      setGameState(GameState.PLAYING);
-      resetGame(GameMode.NEONLINK);
-      // 主叫方负责生成迷宫
-      generateMaze(GameMode.NEONLINK);
+      connectionRef.current = conn; 
+      setConnStatus('connected'); 
+      setGameMode(GameMode.NEONLINK); 
+      setGameState(GameState.PLAYING); 
+      initAudio();
     });
     conn.on('error', () => { setConnStatus('idle'); alert('无法建立连接，请检查 ID 是否正确。'); });
   };
@@ -343,34 +365,33 @@ const App: React.FC = () => {
     initAudio();
     const currentMode = mode || gameMode;
     if (!currentMode) return;
-    const isSpecial = currentMode === GameMode.TRAINING || currentMode === GameMode.NEONLINK;
+    const isSpecialMode = currentMode === GameMode.TRAINING || currentMode === GameMode.NEONLINK;
     
     playerRef.current = {
       ...playerRef.current,
       health: INITIAL_MAX_HEALTH,
       maxHealth: INITIAL_MAX_HEALTH,
       score: 0, level: 1, exp: 0, expToNextLevel: 100,
-      fireRate: isSpecial ? 450 : INITIAL_PLAYER_FIRE_RATE, 
-      damage: isSpecial ? 8 : 35,
-      moveSpeed: isSpecial ? 3.8 : INITIAL_PLAYER_SPEED,
+      fireRate: isSpecialMode ? 450 : INITIAL_PLAYER_FIRE_RATE, 
+      damage: isSpecialMode ? 8 : 35,
+      moveSpeed: isSpecialMode ? 3.8 : INITIAL_PLAYER_SPEED,
       activePowerUps: { ...initialPowerUps }
     };
-    
+
     if (currentMode === GameMode.SURVIVAL) { 
-        playerRef.current.pos = { x: CANVAS_WIDTH / 2, y: CANVAS_HEIGHT / 2 }; 
+      playerRef.current.pos = { x: CANVAS_WIDTH / 2, y: CANVAS_HEIGHT / 2 }; 
     }
-    
+
     opponentRef.current = {
       ...opponentRef.current,
       health: INITIAL_MAX_HEALTH, maxHealth: INITIAL_MAX_HEALTH,
-      fireRate: isSpecial ? 800 : 400, color: '#bd00ff', 
-      damage: isSpecial ? 6 : 25,
-      moveSpeed: isSpecial ? 2.5 : 4,
+      fireRate: isSpecialMode ? 800 : 400, color: '#bd00ff', 
+      damage: isSpecialMode ? 6 : 25,
+      moveSpeed: isSpecialMode ? 2.5 : 4,
       activePowerUps: { ...initialPowerUps }
     };
-    
-    // 多人模式下 generateMaze 由 Host 发起
-    if (currentMode !== GameMode.NEONLINK) {
+
+    if (currentMode !== GameMode.NEONLINK || isHostRef.current) {
         generateMaze(currentMode);
     }
     
@@ -380,34 +401,6 @@ const App: React.FC = () => {
     enemiesKilledRef.current = 0; startTimeRef.current = Date.now(); spawnTimerRef.current = INITIAL_SPAWN_INTERVAL - 200;
     powerUpSpawnTimerRef.current = 0; screenShakeRef.current = 0;
   }, [gameMode]);
-
-  const handleShoot = () => {
-    if (gameState !== GameState.PLAYING) return;
-    const now = Date.now();
-    const pl = playerRef.current;
-    const effectiveFireRate = pl.activePowerUps.overclock > 0 ? pl.fireRate * 0.4 : pl.fireRate;
-    if (now - pl.lastShot < effectiveFireRate) return;
-    const angle = Math.atan2(mouseRef.current.y - pl.pos.y, mouseRef.current.x - pl.pos.x);
-    const speed = pl.activePowerUps.overclock > 0 ? BULLET_SPEED * 1.3 : BULLET_SPEED;
-    let bounceCount = (gameMode === GameMode.TRAINING || gameMode === GameMode.NEONLINK) ? MAX_BOUNCES : 0;
-    let noDecay = false;
-    if (pl.activePowerUps.vectorCore > 0) { bounceCount += 2; noDecay = true; pl.activePowerUps.vectorCore--; }
-    
-    const bullet = {
-      id: Math.random().toString(), pos: { ...pl.pos },
-      velocity: { x: Math.cos(angle) * speed, y: Math.sin(angle) * speed },
-      radius: 4, health: 1, color: pl.activePowerUps.overclock > 0 ? '#f59e0b' : '#00f2ff', 
-      damage: pl.damage, ownerId: 'player', bounceCount, noDecay
-    };
-    
-    bulletsRef.current.push(bullet);
-    pl.lastShot = now; 
-    playSound('shoot');
-
-    if (gameMode === GameMode.NEONLINK && connectionRef.current) {
-      connectionRef.current.send({ type: 'bullet', bullet });
-    }
-  };
 
   const clearHistory = () => { if (confirm('确定要清除所有战绩历史吗？')) { localStorage.removeItem('neon-strike-history'); setGameHistory([]); } };
 
@@ -426,12 +419,7 @@ const App: React.FC = () => {
   };
 
   const spawnPowerUp = () => {
-    if (gameMode === GameMode.SURVIVAL) return;
-    // 多人对战只由发起方触发生成
-    if (gameMode === GameMode.NEONLINK && connectionRef.current && connectionRef.current.peer !== targetId) {
-        // 简单逻辑：如果是主叫方则生成
-    }
-
+    if (gameMode !== GameMode.TRAINING && (gameMode !== GameMode.NEONLINK || !isHostRef.current)) return;
     const types: ('overclock' | 'shield' | 'sensor' | 'vectorCore')[] = ['overclock', 'shield', 'sensor', 'vectorCore'];
     const type = types[Math.floor(Math.random() * types.length)];
     const colors = { overclock: '#f59e0b', shield: '#22c55e', sensor: '#00f2ff', vectorCore: '#bd00ff' };
@@ -444,13 +432,9 @@ const App: React.FC = () => {
       attempts++;
     }
 
-    const newPowerUp: PowerUp = { id: Math.random().toString(), pos: {x, y}, type, color: colors[type], radius: 18, spawnTime: Date.now() };
-    powerUpsRef.current.push(newPowerUp);
+    const id = Math.random().toString();
+    powerUpsRef.current.push({ id, pos: {x, y}, type, color: colors[type], radius: 18, spawnTime: Date.now() });
     createExplosion({x, y}, colors[type], 10, 0.5);
-
-    if (gameMode === GameMode.NEONLINK && connectionRef.current) {
-        connectionRef.current.send({ type: 'powerup_spawn', powerUp: newPowerUp });
-    }
   };
 
   const spawnExperience = (pos: Vector2, value: number) => {
@@ -493,7 +477,7 @@ const App: React.FC = () => {
   }, [gameMode]);
 
   const checkWallCollision = (pos: Vector2, radius: number): boolean => {
-    if (gameMode === GameMode.SURVIVAL || !mazeWallsRef.current) return false;
+    if ((gameMode !== GameMode.TRAINING && gameMode !== GameMode.NEONLINK) || !mazeWallsRef.current) return false;
     for (const wall of mazeWallsRef.current) {
       const closestX = Math.max(wall.x, Math.min(pos.x, wall.x + wall.w));
       const closestY = Math.max(wall.y, Math.min(pos.y, wall.y + wall.h));
@@ -502,6 +486,37 @@ const App: React.FC = () => {
       if (distanceSquared < radius * radius) return true;
     }
     return false;
+  };
+
+  const handleShoot = () => {
+    if (gameState !== GameState.PLAYING) return;
+    const now = Date.now();
+    const pl = playerRef.current;
+    const effectiveFireRate = pl.activePowerUps.overclock > 0 ? pl.fireRate * 0.4 : pl.fireRate;
+    if (now - pl.lastShot < effectiveFireRate) return;
+    const angle = Math.atan2(mouseRef.current.y - pl.pos.y, mouseRef.current.x - pl.pos.x);
+    const speed = pl.activePowerUps.overclock > 0 ? BULLET_SPEED * 1.3 : BULLET_SPEED;
+    let bounceCount = (gameMode === GameMode.TRAINING || gameMode === GameMode.NEONLINK) ? MAX_BOUNCES : 0;
+    let noDecay = false;
+    if (pl.activePowerUps.vectorCore > 0) { bounceCount += 2; noDecay = true; pl.activePowerUps.vectorCore--; }
+    
+    bulletsRef.current.push({
+      id: Math.random().toString(), pos: { ...pl.pos },
+      velocity: { x: Math.cos(angle) * speed, y: Math.sin(angle) * speed },
+      radius: 4, health: 1, color: pl.activePowerUps.overclock > 0 ? '#f59e0b' : '#00f2ff', 
+      damage: pl.damage, ownerId: 'player', bounceCount, noDecay
+    });
+    pl.lastShot = now; playSound('shoot');
+
+    if (gameMode === GameMode.NEONLINK && connectionRef.current) {
+        connectionRef.current.send({
+            type: 'SHOOT',
+            angle,
+            speed,
+            bounceCount,
+            noDecay
+        });
+    }
   };
 
   const triggerLevelUp = () => {
@@ -530,8 +545,12 @@ const App: React.FC = () => {
     if (!checkWallCollision({ x: nextX, y: ai.pos.y }, ai.radius)) ai.pos.x = nextX;
     if (!checkWallCollision({ x: ai.pos.x, y: nextY }, ai.radius)) ai.pos.y = nextY;
     ai.pos.x = Math.max(25, Math.min(CANVAS_WIDTH - 25, ai.pos.x)); ai.pos.y = Math.max(25, Math.min(CANVAS_HEIGHT - 25, ai.pos.y));
+    
+    // 更新 AI 的朝向
+    ai.angle = Math.atan2(dy, dx);
+
     if (now - ai.lastShot > ai.fireRate) {
-      const jitter = (Math.random() - 0.5) * 0.15, angle = Math.atan2(dy, dx) + jitter;
+      const jitter = (Math.random() - 0.5) * 0.15, angle = ai.angle + jitter;
       opponentsBulletsRef.current.push({
         id: Math.random().toString(), pos: { ...ai.pos },
         velocity: { x: Math.cos(angle) * BULLET_SPEED, y: Math.sin(angle) * BULLET_SPEED },
@@ -545,8 +564,7 @@ const App: React.FC = () => {
     if (!mazeWallsRef.current) return null;
     for (const wall of mazeWallsRef.current) {
         if (b.pos.x + b.radius > wall.x && b.pos.x - b.radius < wall.x + wall.w && b.pos.y + b.radius > wall.y && b.pos.y - b.radius < wall.y + wall.h) {
-            const isReflectMode = gameMode === GameMode.TRAINING || gameMode === GameMode.NEONLINK;
-            if (isReflectMode && b.bounceCount && b.bounceCount > 0) {
+            if ((gameMode === GameMode.TRAINING || gameMode === GameMode.NEONLINK) && b.bounceCount && b.bounceCount > 0) {
                 const overlapX = Math.min(b.pos.x + b.radius - wall.x, wall.x + wall.w - (b.pos.x - b.radius));
                 const overlapY = Math.min(b.pos.y + b.radius - wall.y, wall.y + wall.h - (b.pos.y - b.radius));
                 if (overlapX < overlapY) { b.velocity.x *= -1; b.pos.x += b.velocity.x > 0 ? overlapX : -overlapX; }
@@ -583,21 +601,23 @@ const App: React.FC = () => {
     pl.pos.x = Math.max(25, Math.min(CANVAS_WIDTH - 25, pl.pos.x));
     pl.pos.y = Math.max(25, Math.min(CANVAS_HEIGHT - 25, pl.pos.y));
 
+    // 更新本端朝向
+    pl.angle = Math.atan2(mouseRef.current.y - pl.pos.y, mouseRef.current.x - pl.pos.x);
+
+    // 同步本端状态给对端，增加角度同步
     if (gameMode === GameMode.NEONLINK && connectionRef.current) {
-      connectionRef.current.send({
-        type: 'state',
-        pos: pl.pos,
-        health: pl.health,
-        maxHealth: pl.maxHealth,
-        activePowerUps: pl.activePowerUps
-      });
+        connectionRef.current.send({
+            type: 'SYNC_STATE',
+            pos: pl.pos,
+            health: pl.health,
+            powerUps: pl.activePowerUps,
+            angle: pl.angle
+        });
     }
 
-    if (gameMode === GameMode.TRAINING) {
-      updateTrainingAI(dt);
-    }
-    
-    if (gameMode !== GameMode.SURVIVAL) {
+    if (gameMode === GameMode.TRAINING || gameMode === GameMode.NEONLINK) {
+      if (gameMode === GameMode.TRAINING) updateTrainingAI(dt);
+      
       for (let i = powerUpsRef.current.length - 1; i >= 0; i--) {
         const p = powerUpsRef.current[i];
         const dist = Math.sqrt((pl.pos.x - p.pos.x)**2 + (pl.pos.y - p.pos.y)**2);
@@ -610,14 +630,14 @@ const App: React.FC = () => {
           createExplosion(p.pos, p.color, 25, 1.2);
           
           if (gameMode === GameMode.NEONLINK && connectionRef.current) {
-            connectionRef.current.send({ type: 'powerup_collect', id: p.id });
+            connectionRef.current.send({ type: 'POWERUP_COLLECT', id: p.id });
           }
+          
           powerUpsRef.current.splice(i, 1);
         }
       }
-      // 只有 Host 发起因子生成
-      const isHost = gameMode === GameMode.NEONLINK ? (connectionRef.current && connectionRef.current.peer === targetId) : true;
-      if (isHost || gameMode === GameMode.TRAINING) {
+
+      if (gameMode === GameMode.TRAINING || (gameMode === GameMode.NEONLINK && isHostRef.current)) {
           powerUpSpawnTimerRef.current += dt;
           if (powerUpSpawnTimerRef.current > 12000) { spawnPowerUp(); powerUpSpawnTimerRef.current = 0; }
       }
@@ -652,34 +672,56 @@ const App: React.FC = () => {
         if (pl.activePowerUps.shield) {
             pl.activePowerUps.shield = false; playSound('powerup'); createExplosion(pl.pos, '#22c55e', 20, 1.5); container.splice(idx, 1); return true;
         }
-        pl.health -= bullet.damage; playSound('playerHit'); screenShakeRef.current = 10; container.splice(idx, 1); if (pl.health <= 0) endGame(); return true;
+        pl.health -= bullet.damage; playSound('playerHit'); screenShakeRef.current = 10; container.splice(idx, 1); 
+        if (pl.health <= 0) {
+            if (gameMode === GameMode.NEONLINK && connectionRef.current) {
+                connectionRef.current.send({ type: 'GAME_OVER' });
+            }
+            endGame();
+        }
+        return true;
     };
 
     for (let i = bulletsRef.current.length - 1; i >= 0; i--) {
       const b = bulletsRef.current[i]; b.pos.x += b.velocity.x; b.pos.y += b.velocity.y;
       const bounceResult = processBulletBounce(b);
       if (bounceResult === false) { createExplosion(b.pos, '#f59e0b', 5, 0.3); bulletsRef.current.splice(i, 1); continue; }
-      const isDuelMode = gameMode === GameMode.TRAINING || gameMode === GameMode.NEONLINK;
-      if (isDuelMode) {
+      if (gameMode === GameMode.TRAINING || gameMode === GameMode.NEONLINK) {
         const ai = opponentRef.current; const dAi = Math.sqrt((b.pos.x - ai.pos.x)**2 + (b.pos.y - ai.pos.y)**2);
-        if (dAi < ai.radius + b.radius) { 
-            if (gameMode === GameMode.TRAINING) ai.health -= b.damage; 
+        if (dAi < ai.radius + b.radius) {
+            if (gameMode === GameMode.TRAINING) {
+                ai.health -= b.damage;
+                if (ai.health <= 0) endGame();
+            }
             playSound('hit'); createExplosion(b.pos, ai.color, 5, 0.5); bulletsRef.current.splice(i, 1); 
-            if (gameMode === GameMode.TRAINING && ai.health <= 0) endGame(); continue; 
+            continue; 
         }
         const dPl = Math.sqrt((b.pos.x - pl.pos.x)**2 + (b.pos.y - pl.pos.y)**2);
         if (b.bounceCount < MAX_BOUNCES && dPl < pl.radius + b.radius) { handleBulletHitPlayer(b, bulletsRef.current, i); continue; }
       }
       if (b.pos.x < -100 || b.pos.x > CANVAS_WIDTH + 100 || b.pos.y < -100 || b.pos.y > CANVAS_HEIGHT + 100) bulletsRef.current.splice(i, 1);
     }
+
     for (let i = opponentsBulletsRef.current.length - 1; i >= 0; i--) {
       const b = opponentsBulletsRef.current[i]; b.pos.x += b.velocity.x; b.pos.y += b.velocity.y;
       const bounceResult = processBulletBounce(b);
       if (bounceResult === false) { createExplosion(b.pos, '#f59e0b', 5, 0.3); opponentsBulletsRef.current.splice(i, 1); continue; }
       const dPl = Math.sqrt((b.pos.x - pl.pos.x)**2 + (b.pos.y - pl.pos.y)**2);
       if (dPl < pl.radius + b.radius) { handleBulletHitPlayer(b, opponentsBulletsRef.current, i); continue; }
+      if (gameMode === GameMode.TRAINING || gameMode === GameMode.NEONLINK) {
+          const ai = opponentRef.current; const dAi = Math.sqrt((b.pos.x - ai.pos.x)**2 + (b.pos.y - ai.pos.y)**2);
+          if (b.bounceCount < MAX_BOUNCES && dAi < ai.radius + b.radius) { 
+              if (gameMode === GameMode.TRAINING) {
+                  ai.health -= b.damage; 
+                  if (ai.health <= 0) endGame();
+              }
+              playSound('hit'); createExplosion(b.pos, ai.color, 5, 0.5); opponentsBulletsRef.current.splice(i, 1); 
+              continue; 
+          }
+      }
       if (b.pos.x < -100 || b.pos.x > CANVAS_WIDTH + 100 || b.pos.y < -100 || b.pos.y > CANVAS_HEIGHT + 100) opponentsBulletsRef.current.splice(i, 1);
     }
+
     for (let i = enemyBulletsRef.current.length - 1; i >= 0; i--) {
       const b = enemyBulletsRef.current[i];
       if (b.isHoming && b.lifeSpan && b.lifeSpan > 0) {
@@ -692,7 +734,7 @@ const App: React.FC = () => {
       if (dist < pl.radius + b.radius) { handleBulletHitPlayer(b, enemyBulletsRef.current, i); continue; }
       if (b.pos.x < -100 || b.pos.x > CANVAS_WIDTH + 100 || b.pos.y < -100 || b.pos.y > CANVAS_HEIGHT + 100) enemyBulletsRef.current.splice(i, 1);
     }
-    
+
     if (gameMode === GameMode.SURVIVAL) {
       for (let i = enemiesRef.current.length - 1; i >= 0; i--) {
         const e = enemiesRef.current[i]; const dx = pl.pos.x - e.pos.x, dy = pl.pos.y - e.pos.y, dist = Math.sqrt(dx * dx + dy * dy);
@@ -754,25 +796,50 @@ const App: React.FC = () => {
     for (let i = -60; i < CANVAS_HEIGHT + 60; i += 60) { ctx.beginPath(); ctx.moveTo(0, i - parallaxY); ctx.lineTo(CANVAS_WIDTH, i - parallaxY); ctx.stroke(); }
     if (![GameState.PLAYING, GameState.GAMEOVER, GameState.LEVEL_UP].includes(gameState)) { ctx.restore(); return; }
     
-    const pl = playerRef.current;
-    
-    if (gameMode !== GameMode.SURVIVAL && mazeWallsRef.current) {
+    const isSpecialMode = gameMode === GameMode.TRAINING || gameMode === GameMode.NEONLINK;
+
+    if (isSpecialMode && mazeWallsRef.current) {
       mazeWallsRef.current.forEach(w => {
         ctx.save(); ctx.shadowBlur = 10; ctx.shadowColor = 'rgba(245, 158, 11, 0.5)'; ctx.fillStyle = 'rgba(245, 158, 11, 0.1)'; ctx.fillRect(w.x, w.y, w.w, w.h);
         ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 2; ctx.strokeRect(w.x, w.y, w.w, w.h); ctx.restore();
       });
       
       const opp = opponentRef.current;
-      ctx.save(); ctx.translate(opp.pos.x, opp.pos.y);
-      ctx.strokeStyle = opp.color; ctx.shadowBlur = 15; ctx.shadowColor = opp.color; ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.arc(0, 0, opp.radius, 0, Math.PI * 2); ctx.stroke();
-      if (opp.activePowerUps.shield) {
-          ctx.save(); ctx.rotate(Date.now() * 0.002);
-          ctx.strokeStyle = '#22c55e'; ctx.lineWidth = 2; ctx.shadowBlur = 15; ctx.shadowColor = '#22c55e';
-          ctx.beginPath(); for(let i=0; i<6; i++) { const a = (i/6)*Math.PI*2; const x = Math.cos(a)*30, y = Math.sin(a)*30; if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); }
-          ctx.closePath(); ctx.stroke(); ctx.restore();
+      const pl = playerRef.current;
+      const distToOpp = Math.sqrt((pl.pos.x - opp.pos.x)**2 + (pl.pos.y - opp.pos.y)**2);
+      const isOppVisible = pl.activePowerUps.sensor > 0 || distToOpp < 420;
+      
+      if (isOppVisible) {
+        // 修改：将对手也绘制为三角形战机模型
+        ctx.save();
+        ctx.translate(opp.pos.x, opp.pos.y);
+        ctx.rotate(opp.angle || 0);
+        ctx.strokeStyle = opp.color;
+        ctx.shadowBlur = 25;
+        ctx.shadowColor = opp.color;
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(18, 0);
+        ctx.lineTo(-12, -12);
+        ctx.lineTo(-12, 12);
+        ctx.closePath();
+        ctx.stroke();
+        
+        // 如果对手有护盾
+        if (opp.activePowerUps.shield) {
+            ctx.rotate(-Date.now() * 0.002);
+            ctx.strokeStyle = '#22c55e';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for(let i=0; i<6; i++) {
+                const a = (i/6)*Math.PI*2;
+                const x = Math.cos(a)*35, y = Math.sin(a)*35;
+                if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+            }
+            ctx.closePath(); ctx.stroke();
+        }
+        ctx.restore();
       }
-      ctx.restore();
 
       powerUpsRef.current.forEach(p => {
           ctx.save(); ctx.translate(p.pos.x, p.pos.y);
@@ -782,8 +849,8 @@ const App: React.FC = () => {
           ctx.fillStyle = p.color; ctx.globalAlpha = 0.2; ctx.fillRect(-p.radius, -p.radius, p.radius*2, p.radius*2);
           ctx.globalAlpha = 1.0; ctx.restore();
       });
-    }
-
+    } else { enemiesRef.current.forEach(e => drawEntity(ctx, e)); }
+    
     experienceOrbsRef.current.forEach(orb => {
       ctx.fillStyle = orb.color; ctx.shadowBlur = 15; ctx.shadowColor = orb.color; ctx.beginPath(); ctx.arc(orb.pos.x, orb.pos.y, orb.radius, 0, Math.PI * 2); ctx.fill();
     });
@@ -792,8 +859,9 @@ const App: React.FC = () => {
     });
     particlesRef.current.forEach(p => { ctx.fillStyle = p.color; ctx.globalAlpha = p.life; ctx.fillRect(p.pos.x, p.pos.y, 3 * p.life, 3 * p.life); });
     ctx.globalAlpha = 1;
+    const pl = playerRef.current;
     
-    if (gameMode !== GameMode.SURVIVAL) {
+    if (isSpecialMode) {
       ctx.save();
       const isScanning = pl.activePowerUps.sensor > 8000;
       const baseFogRadius = pl.activePowerUps.sensor > 0 ? 650 : 420;
@@ -817,9 +885,9 @@ const App: React.FC = () => {
           ctx.closePath(); ctx.stroke(); ctx.restore();
       }
     }
-    
+
     ctx.save(); ctx.translate(pl.pos.x, pl.pos.y);
-    ctx.rotate(Math.atan2(mouseRef.current.y - pl.pos.y, mouseRef.current.x - pl.pos.x));
+    ctx.rotate(pl.angle || 0);
     const gunColor = pl.activePowerUps.overclock > 0 ? '#f59e0b' : pl.color;
     ctx.strokeStyle = gunColor; ctx.shadowBlur = 25; ctx.shadowColor = gunColor; ctx.lineWidth = 4;
     ctx.beginPath(); ctx.moveTo(18, 0); ctx.lineTo(-12, -12); ctx.lineTo(-12, 12); ctx.closePath(); ctx.stroke();
@@ -832,7 +900,6 @@ const App: React.FC = () => {
     });
     opponentsBulletsRef.current.forEach(b => {
       ctx.strokeStyle = b.color; ctx.lineWidth = b.radius * 1.5; ctx.beginPath(); ctx.moveTo(b.pos.x, b.pos.y); ctx.lineTo(b.pos.x - b.velocity.x * 1.5, b.pos.y - b.velocity.y * 1.5); ctx.stroke();
-      if (b.noDecay) { ctx.fillStyle = '#bd00ff'; ctx.beginPath(); ctx.arc(b.pos.x, b.pos.y, 2, 0, Math.PI*2); ctx.fill(); }
     });
     enemyBulletsRef.current.forEach(b => { ctx.fillStyle = b.color; ctx.beginPath(); ctx.arc(b.pos.x, b.pos.y, b.radius, 0, Math.PI * 2); ctx.fill(); });
     if (gameMode === GameMode.SURVIVAL) { enemiesRef.current.forEach(e => drawEntity(ctx, e)); }
@@ -862,8 +929,8 @@ const App: React.FC = () => {
     };
   }, [gameState]);
 
-  const startSurvival = async () => { await initAudio(); setGameMode(GameMode.SURVIVAL); setGameState(GameState.PLAYING); resetGame(GameMode.SURVIVAL); };
-  const startTraining = async () => { await initAudio(); setGameMode(GameMode.TRAINING); setGameState(GameState.PLAYING); resetGame(GameMode.TRAINING); };
+  const startSurvival = async () => { await initAudio(); setGameMode(GameMode.SURVIVAL); resetGame(GameMode.SURVIVAL); setGameState(GameState.PLAYING); };
+  const startTraining = async () => { await initAudio(); setGameMode(GameMode.TRAINING); resetGame(GameMode.TRAINING); setGameState(GameState.PLAYING); };
   
   const endGame = () => {
     const finalScore = scoreRef.current, finalKills = enemiesKilledRef.current, finalTime = Math.floor((Date.now() - startTimeRef.current) / 1000);
@@ -888,17 +955,71 @@ const App: React.FC = () => {
         <div className="absolute top-0 left-0 w-full h-1.5 bg-gray-900/50 z-20 overflow-hidden"><div className="h-full bg-[#00f2ff] shadow-[0_0_20px_#00f2ff] transition-all duration-500 ease-out" style={{ width: `${expProgress * 100}%` }} /></div>
       )}
       {gameState === GameState.PLAYING && (gameMode === GameMode.TRAINING || gameMode === GameMode.NEONLINK) && (
-        <div className="absolute top-10 left-1/2 -translate-x-1/2 w-full max-w-4xl px-12 flex justify-between items-center z-50 pointer-events-none">
-            <div className="flex flex-col items-start gap-1">
-                <div className="text-[10px] font-bold text-[#00f2ff] tracking-[0.2em] uppercase">本机单元</div>
-                <div className="w-72 h-3 bg-gray-900/80 rounded-full border border-white/10 overflow-hidden backdrop-blur-md"><div className="h-full bg-[#00f2ff] shadow-[0_0_15px_#00f2ff] transition-all duration-300" style={{ width: `${(playerRef.current.health / playerRef.current.maxHealth) * 100}%` }} /></div>
+        <>
+            <div className="absolute top-10 left-1/2 -translate-x-1/2 w-full max-w-4xl px-12 flex justify-between items-center z-50 pointer-events-none">
+                <div className="flex flex-col items-start gap-1">
+                    <div className="text-[10px] font-bold text-[#00f2ff] tracking-[0.2em] uppercase">本机单元</div>
+                    <div className="w-72 h-3 bg-gray-900/80 rounded-full border border-white/10 overflow-hidden backdrop-blur-md"><div className="h-full bg-[#00f2ff] shadow-[0_0_15px_#00f2ff] transition-all duration-300" style={{ width: `${(playerRef.current.health / playerRef.current.maxHealth) * 100}%` }} /></div>
+                </div>
+                <Swords className="text-white/20 animate-pulse" size={32} />
+                <div className="flex flex-col items-end gap-1">
+                    <div className="text-[10px] font-bold text-[#bd00ff] tracking-[0.2em] uppercase">{gameMode === GameMode.TRAINING ? '模拟协议' : '远程单元'}</div>
+                    <div className="w-72 h-3 bg-gray-900/80 rounded-full border border-white/10 overflow-hidden backdrop-blur-md"><div className="h-full bg-[#bd00ff] shadow-[0_0_15px_#bd00ff] transition-all duration-300" style={{ width: `${(opponentRef.current.health / opponentRef.current.maxHealth) * 100}%` }} /></div>
+                </div>
             </div>
-            <Swords className="text-white/20 animate-pulse" size={32} />
-            <div className="flex flex-col items-end gap-1">
-                <div className="text-[10px] font-bold text-[#bd00ff] tracking-[0.2em] uppercase">{gameMode === GameMode.TRAINING ? '模拟协议' : '远程操纵者'}</div>
-                <div className="w-72 h-3 bg-gray-900/80 rounded-full border border-white/10 overflow-hidden backdrop-blur-md"><div className="h-full bg-[#bd00ff] shadow-[0_0_15px_#bd00ff] transition-all duration-300" style={{ width: `${(opponentRef.current.health / opponentRef.current.maxHealth) * 100}%` }} /></div>
+            {(gameMode === GameMode.TRAINING || gameMode === GameMode.NEONLINK) && (
+                <div className="absolute bottom-10 left-1/2 -translate-x-1/2 flex gap-4 z-50">
+                    {playerRef.current.activePowerUps.overclock > 0 && (
+                        <div className="flex items-center gap-2 bg-[#f59e0b]/20 border border-[#f59e0b]/50 px-3 py-1.5 rounded-lg animate-pulse">
+                            <Zap size={14} className="text-[#f59e0b]" />
+                            <span className="text-[10px] font-black uppercase text-[#f59e0b]">Overclock</span>
+                        </div>
+                    )}
+                    {playerRef.current.activePowerUps.shield && (
+                        <div className="flex items-center gap-2 bg-[#22c55e]/20 border border-[#22c55e]/50 px-3 py-1.5 rounded-lg">
+                            <Shield size={14} className="text-[#22c55e]" />
+                            <span className="text-[10px] font-black uppercase text-[#22c55e]">Shield Ready</span>
+                        </div>
+                    )}
+                    {playerRef.current.activePowerUps.sensor > 0 && (
+                        <div className="flex items-center gap-2 bg-[#00f2ff]/20 border border-[#00f2ff]/50 px-3 py-1.5 rounded-lg">
+                            <Eye size={14} className="text-[#00f2ff]" />
+                            <span className="text-[10px] font-black uppercase text-[#00f2ff]">Sensor Array</span>
+                        </div>
+                    )}
+                    {playerRef.current.activePowerUps.vectorCore > 0 && (
+                        <div className="flex items-center gap-2 bg-[#bd00ff]/20 border border-[#bd00ff]/50 px-3 py-1.5 rounded-lg">
+                            <Layers size={14} className="text-[#bd00ff]" />
+                            <span className="text-[10px] font-black uppercase text-[#bd00ff]">Vector Core x{playerRef.current.activePowerUps.vectorCore}</span>
+                        </div>
+                    )}
+                </div>
+            )}
+        </>
+      )}
+      {gameState === GameState.PLAYING && gameMode === GameMode.SURVIVAL && (
+        <div className="absolute top-0 left-0 w-full p-6 pointer-events-none flex justify-between items-start z-10 mt-2">
+          <div className="space-y-3">
+            <div className={`bg-black/60 backdrop-blur-xl border ${playerRef.current.health < playerRef.current.maxHealth * 0.3 ? 'border-red-500/50 animate-pulse' : 'border-[#00f2ff]/30'} p-4 rounded-2xl flex items-center gap-4 transition-colors duration-500`}>
+              <Shield className={`${playerRef.current.health < playerRef.current.maxHealth * 0.3 ? 'text-red-500' : 'text-[#00f2ff]'} w-5 h-5`} />
+              <div className="flex-1">
+                <div className="flex justify-between items-end mb-1">
+                   <div className={`text-[10px] uppercase tracking-[0.2em] ${playerRef.current.health < playerRef.current.maxHealth * 0.3 ? 'text-red-400' : 'text-[#00f2ff]/60'} font-bold`}>机体完整性</div>
+                   <div className="text-[10px] font-mono text-white/40">{Math.ceil(playerRef.current.health)}/{playerRef.current.maxHealth}</div>
+                </div>
+                <div className="w-40 h-2 bg-gray-800/50 rounded-full overflow-hidden"><div className={`h-full ${playerRef.current.health < playerRef.current.maxHealth * 0.3 ? 'bg-red-500 shadow-[0_0_15px_rgba(239,68,68,0.8)]' : 'bg-[#00f2ff] shadow-[0_0_15px_#00f2ff]'} transition-all duration-300`} style={{ width: `${(playerRef.current.health / playerRef.current.maxHealth) * 100}%` }} /></div>
+              </div>
             </div>
+            <div className="flex gap-3">
+              <div className="bg-black/40 backdrop-blur-md border border-[#ff0055]/20 p-4 rounded-2xl flex items-center gap-4"><Target className="text-[#ff0055] w-5 h-5" /><div><div className="text-[10px] uppercase tracking-[0.2em] text-[#ff0055]/60 font-bold">累计载荷</div><div className="text-xl font-mono font-bold text-[#ff0055] leading-none">{score.toLocaleString()}</div></div></div>
+              <div className="bg-black/40 backdrop-blur-md border border-yellow-500/20 p-4 rounded-2xl flex items-center gap-4"><ArrowUpCircle className="text-yellow-500 w-5 h-5" /><div><div className="text-[10px] uppercase tracking-[0.2em] text-yellow-500/60 font-bold">同步等级</div><div className="text-xl font-mono font-bold text-yellow-500 leading-none">LV.{level}</div></div></div>
+            </div>
+          </div>
+          <div className="flex flex-col items-end gap-3 pointer-events-auto"><div className="bg-black/40 backdrop-blur-md border border-white/5 px-4 py-2 rounded-xl text-right"><div className="text-[9px] uppercase tracking-widest text-white/30">RUNTIME</div><div className="text-sm font-mono text-white/70">{elapsedTime}s</div></div></div>
         </div>
+      )}
+      {gameState === GameState.PLAYING && (gameMode === GameMode.TRAINING || gameMode === GameMode.NEONLINK) && (
+        <button onClick={() => { if (connectionRef.current) connectionRef.current.close(); setGameState(GameState.START); }} className="absolute bottom-8 left-8 z-50 px-6 py-3 bg-white/5 border border-white/10 rounded-xl hover:bg-white/10 hover:border-white/30 transition-all font-bold uppercase text-[10px] tracking-widest flex items-center gap-2"><RotateCcw size={14} /> 退出{gameMode === GameMode.TRAINING ? '模拟' : '对战'}</button>
       )}
       {gameState === GameState.START && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/50 backdrop-blur-lg z-50 p-4 gap-8">
@@ -906,26 +1027,29 @@ const App: React.FC = () => {
           <div className="max-w-7xl w-full grid grid-cols-1 md:grid-cols-3 gap-6">
             <div onClick={startSurvival} className="group relative overflow-hidden bg-white/5 border border-white/10 rounded-[2.5rem] p-10 cursor-pointer hover:border-[#00f2ff] hover:bg-[#00f2ff]/5 transition-all duration-300 transform hover:-translate-y-2 flex flex-col items-center text-center shadow-[0_0_40px_rgba(0,0,0,0.5)]">
               <div className="p-5 bg-[#00f2ff]/10 rounded-2xl group-hover:scale-110 transition-transform mb-6"><User className="text-[#00f2ff]" size={40} /></div>
-              <div className="space-y-4 flex-1"><h3 className="text-3xl font-black uppercase italic tracking-tight">单人生存</h3><p className="text-white/40 text-xs font-medium leading-relaxed">单机对垒进化病毒。<br/>收集经验核心，无限进化机体。你能撑多久？</p><div className="pt-4 mt-auto"><div className="text-[10px] uppercase text-yellow-500/50 font-bold mb-1">本机最高载荷</div><div className="text-2xl font-mono text-yellow-500 font-bold">{highScore.toLocaleString()}</div></div></div>
-              <button className="mt-8 w-full py-4 bg-[#00f2ff] text-black font-black italic rounded-xl group-hover:brightness-125 transition-all uppercase">接入生存链路</button>
+              <div className="space-y-4 flex-1"><h3 className="text-3xl font-black uppercase italic tracking-tight">生存协议</h3><p className="text-white/40 text-xs font-medium leading-relaxed">单人对抗进化病毒。<br/>收集核心，无限进化，获取最高载荷记录。</p><div className="pt-4 mt-auto"><div className="text-[10px] uppercase text-yellow-500/50 font-bold mb-1">本机最高记录</div><div className="text-2xl font-mono text-yellow-500 font-bold">{highScore.toLocaleString()}</div></div></div>
+              <button className="mt-8 w-full py-4 bg-[#00f2ff] text-black font-black italic rounded-xl group-hover:brightness-125 transition-all uppercase">接入系统</button>
             </div>
             
             <div className="group relative overflow-hidden bg-white/5 border border-white/10 rounded-[2.5rem] p-10 cursor-pointer hover:border-[#f59e0b] hover:bg-[#f59e0b]/5 transition-all duration-300 transform hover:-translate-y-2 flex flex-col items-center text-center shadow-[0_0_40px_rgba(0,0,0,0.5)]">
               <div onClick={() => setShowTrainingInfo(true)} className="absolute top-6 right-6 p-2 text-white/20 hover:text-[#f59e0b] hover:bg-white/5 rounded-xl transition-all z-10"><Info size={20} /></div>
               <div onClick={startTraining} className="flex flex-col items-center w-full h-full">
                 <div className="p-5 bg-[#f59e0b]/10 rounded-2xl group-hover:scale-110 transition-transform mb-6"><GraduationCap className="text-[#f59e0b]" size={40} /></div>
-                <div className="space-y-4 flex-1 flex flex-col items-center"><h3 className="text-3xl font-black uppercase italic tracking-tight text-white group-hover:text-[#f59e0b]">训练模式</h3><p className="text-white/40 text-xs font-medium leading-relaxed">琥珀迷宫战术演习。<br/>在视野遮蔽的动态迷宫中，对抗高精度 AI 模拟协议。</p></div>
-                <button onClick={(e) => { e.stopPropagation(); startTraining(); }} className="mt-8 w-full py-4 bg-[#f59e0b] text-black font-black italic rounded-xl group-hover:brightness-125 transition-all uppercase">启动战术演练</button>
+                <div className="space-y-4 flex-1 flex flex-col items-center">
+                  <h3 className="text-3xl font-black uppercase italic tracking-tight text-white group-hover:text-[#f59e0b]">训练模式</h3>
+                  <div className="mt-auto py-2 px-4 bg-[#f59e0b]/20 rounded-full text-[9px] text-[#f59e0b] font-black uppercase tracking-tighter shadow-[0_0_10px_rgba(245,158,11,0.2)]">琥珀格栅已就绪</div>
+                </div>
+                <button onClick={(e) => { e.stopPropagation(); startTraining(); }} className="mt-8 w-full py-4 bg-[#f59e0b] text-black font-black italic rounded-xl group-hover:brightness-125 transition-all uppercase">开始训练</button>
               </div>
             </div>
 
             <div className="bg-white/5 border border-white/10 rounded-[2.5rem] p-10 flex flex-col items-center text-center group hover:border-[#ff0055]/50 transition-all shadow-[0_0_40px_rgba(0,0,0,0.5)]">
               <div className="p-5 bg-[#ff0055]/10 rounded-2xl group-hover:scale-110 transition-transform mb-6"><Globe className="text-[#ff0055]" size={40} /></div>
-              <div className="space-y-4 flex-1 w-full"><h3 className="text-3xl font-black uppercase italic tracking-tight">多人对战</h3><p className="text-white/40 text-xs font-medium leading-relaxed">P2P 实时琥珀迷宫对决。<br/>通过对等网络直接连接，在同步迷宫中与另一位操纵者进行博弈。</p>
+              <div className="space-y-4 flex-1 w-full"><h3 className="text-3xl font-black uppercase italic tracking-tight">霓虹链路</h3><p className="text-white/40 text-xs font-medium leading-relaxed">P2P 远程对战协议。<br/>在加密链路迷宫中与真人进行视觉博弈。</p>
                 <div className="w-full space-y-4 pt-4"><div className="flex flex-col gap-2"><div className="flex items-center justify-between bg-black/50 px-4 py-3 rounded-xl border border-white/5"><div className="text-left overflow-hidden"><div className="text-[8px] uppercase text-white/30 font-bold tracking-widest mb-1">Local ID</div><div className="font-mono text-sm text-[#ff0055] font-bold truncate">{peerId || '...'}</div></div><button onClick={copyId} className="p-2 hover:bg-white/10 rounded-lg text-white/40 transition-colors">{copyFeedback ? <Check size={16} className="text-green-500" /> : <Copy size={16} />}</button></div>
-                    <div className="flex gap-2"><input type="text" placeholder="目标操纵者 ID..." value={targetId} onChange={(e) => setTargetId(e.target.value)} className="flex-1 bg-black/50 border border-white/10 rounded-xl px-4 py-3 text-sm font-mono focus:border-[#ff0055] outline-none transition-colors" /><button onClick={connectToPeer} disabled={connStatus === 'connecting' || !targetId} className="bg-white text-black font-black px-6 rounded-xl text-sm hover:bg-[#ff0055] hover:text-white transition-all disabled:opacity-50"><LinkIcon size={18} /></button></div>
+                    <div className="flex gap-2"><input type="text" placeholder="目标链路 ID..." value={targetId} onChange={(e) => setTargetId(e.target.value)} className="flex-1 bg-black/50 border border-white/10 rounded-xl px-4 py-3 text-sm font-mono focus:border-[#ff0055] outline-none transition-colors" /><button onClick={connectToPeer} disabled={connStatus === 'connecting' || !targetId} className="bg-white text-black font-black px-6 rounded-xl text-sm hover:bg-[#ff0055] hover:text-white transition-all disabled:opacity-50"><LinkIcon size={18} /></button></div>
                 </div></div></div>
-              <button disabled={!targetId} onClick={connectToPeer} className="mt-8 w-full py-4 bg-[#ff0055] text-white font-black italic rounded-xl group-hover:brightness-125 transition-all uppercase disabled:opacity-50">建立多人对战</button>
+              <button disabled={!targetId} onClick={connectToPeer} className="mt-8 w-full py-4 bg-[#ff0055] text-white font-black italic rounded-xl group-hover:brightness-125 transition-all uppercase disabled:opacity-50">建立连接</button>
             </div>
           </div>
           <div className="text-[9px] font-bold text-white/20 flex justify-center gap-6 uppercase tracking-widest mt-4"><span>WASD: 移动</span><span>Mouse-1: 发射高能脉冲</span></div>
@@ -1006,10 +1130,10 @@ const App: React.FC = () => {
           </div></div>
       )}
       {gameState === GameState.GAMEOVER && (
-        <div className="absolute inset-0 flex items-center justify-center bg-[#060606]/95 backdrop-blur-xl z-50 p-6 overflow-y-auto"><div className="max-w-5xl w-full flex flex-col md:flex-row gap-10 items-center"><div className="flex-1 w-full bg-black/40 border border-[#ff0055]/30 p-10 md:p-14 rounded-[3.5rem] shadow-[0_0_120px_rgba(255,0,85,0.15)] relative overflow-hidden"><div className="absolute top-0 right-0 w-32 h-32 bg-[#ff0055]/5 blur-3xl"></div><div className="flex justify-between items-start mb-12"><div className="space-y-1"><h2 className="text-5xl font-black text-[#ff0055] tracking-tighter uppercase italic leading-none">{gameMode === GameMode.TRAINING ? 'Simulation\nComplete' : (playerRef.current.health > 0 ? 'Protocol\nVictory' : 'Combat\nOver')}</h2><p className="text-[10px] font-bold text-white/20 uppercase tracking-widest mt-2">{gameMode === GameMode.TRAINING ? '模拟作战流程已结束' : '神经链路同步已中断'}</p></div>
+        <div className="absolute inset-0 flex items-center justify-center bg-[#060606]/95 backdrop-blur-xl z-50 p-6 overflow-y-auto"><div className="max-w-5xl w-full flex flex-col md:flex-row gap-10 items-center"><div className="flex-1 w-full bg-black/40 border border-[#ff0055]/30 p-10 md:p-14 rounded-[3.5rem] shadow-[0_0_120px_rgba(255,0,85,0.15)] relative overflow-hidden"><div className="absolute top-0 right-0 w-32 h-32 bg-[#ff0055]/5 blur-3xl"></div><div className="flex justify-between items-start mb-12"><div className="space-y-1"><h2 className="text-5xl font-black text-[#ff0055] tracking-tighter uppercase italic leading-none">{gameMode === GameMode.TRAINING || gameMode === GameMode.NEONLINK ? 'Protocol\nComplete' : 'Connection\nSevered'}</h2><p className="text-[10px] font-bold text-white/20 uppercase tracking-widest mt-2">{gameMode === GameMode.TRAINING ? '模拟作战流程已结束' : '神经链路已强制断开'}</p></div>
                 {gameMode === GameMode.SURVIVAL && (<div className="text-right"><div className="text-[10px] uppercase text-yellow-500/60 font-bold tracking-widest mb-1">峰值载荷记录</div><div className="text-3xl font-mono text-yellow-500 font-bold leading-none">{highScore.toLocaleString()}</div></div>)}
               </div>
-              <div className="grid grid-cols-2 gap-6 mb-12"><div className="bg-white/5 p-8 rounded-3xl border border-white/5 text-center group hover:border-[#00f2ff]/20 transition-colors"><div className="text-[10px] uppercase text-white/30 mb-2 font-black tracking-widest">最终状态</div><div className="text-5xl font-bold text-[#00f2ff] font-mono leading-none group-hover:scale-105 transition-transform">{gameMode !== GameMode.SURVIVAL ? (playerRef.current.health > 0 ? 'WIN' : 'FAIL') : score.toLocaleString()}</div></div>
+              <div className="grid grid-cols-2 gap-6 mb-12"><div className="bg-white/5 p-8 rounded-3xl border border-white/5 text-center group hover:border-[#00f2ff]/20 transition-colors"><div className="text-[10px] uppercase text-white/30 mb-2 font-black tracking-widest">最终状态</div><div className="text-5xl font-bold text-[#00f2ff] font-mono leading-none group-hover:scale-105 transition-transform">{(gameMode === GameMode.TRAINING || gameMode === GameMode.NEONLINK) ? (playerRef.current.health > 0 ? 'WIN' : 'FAIL') : score.toLocaleString()}</div></div>
                 <div className="bg-white/5 p-8 rounded-3xl border border-white/5 text-center group hover:border-yellow-500/20 transition-colors"><div className="text-[10px] uppercase text-white/30 mb-2 font-black tracking-widest">同步等级</div><div className="text-5xl font-bold text-yellow-500 font-mono leading-none group-hover:scale-105 transition-transform">LV.{level}</div></div>
               </div>
               <button onClick={() => setGameState(GameState.START)} className="w-full bg-white hover:bg-[#00f2ff] hover:text-white text-black font-black py-6 rounded-2xl flex items-center justify-center gap-4 transition-all transform active:scale-95 shadow-xl uppercase text-lg group"><RotateCcw size={24} className="group-hover:rotate-180 transition-transform duration-500" /> 返回主终端</button>
